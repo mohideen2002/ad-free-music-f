@@ -8,9 +8,16 @@ export default function Artist() {
   const { id } = useParams()
   const [a, setA] = useState(null)
   const [err, setErr] = useState(false)
+  const [attempt, setAttempt] = useState(0)
   const { playList } = usePlayer()
-  useEffect(() => { setA(null); setErr(false); getArtist(id).then(setA).catch(() => setErr(true)) }, [id])
-  if (err) return <div className="page muted">Could not load this artist.</div>
+  useEffect(() => {
+    let active = true
+    setA(null)
+    setErr(false)
+    getArtist(id).then((result) => { if (active) setA(result) }).catch(() => { if (active) setErr(true) })
+    return () => { active = false }
+  }, [id, attempt])
+  if (err) return <div className="page error-state"><p>Could not load this artist.</p><button type="button" className="more" onClick={() => setAttempt((value) => value + 1)}>Try again</button></div>
   if (!a) return <div className="page muted">Loading…</div>
   return (
     <div className="page">

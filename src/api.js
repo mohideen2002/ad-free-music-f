@@ -48,12 +48,20 @@ export const dedupe = (list) => {
 }
 // 1) try "<query> tamil"  2) try plain query  -> keep only Tamil if any exists; else fall back to other languages
 async function tamilFirst(fetchFn, query) {
-  let r = await fetchFn(query + ' tamil').catch(() => [])
-  let t = r.filter(isTamil)
-  if (t.length) return dedupe(t)
-  r = await fetchFn(query).catch(() => [])
-  t = r.filter(isTamil)
-  return dedupe(t.length ? t : r)
+  let firstResults = []
+  try {
+    firstResults = await fetchFn(query + ' tamil')
+    const tamil = firstResults.filter(isTamil)
+    if (tamil.length) return dedupe(tamil)
+  } catch {}
+  try {
+    const r = await fetchFn(query)
+    const tamil = r.filter(isTamil)
+    return dedupe(tamil.length ? tamil : r.length ? r : firstResults)
+  } catch (e) {
+    if (firstResults.length) return dedupe(firstResults)
+    throw e
+  }
 }
 export const pickUrl = (urls = [], pref = '160kbps') => {
   const order = ['320kbps', '160kbps', '96kbps', '48kbps', '12kbps']

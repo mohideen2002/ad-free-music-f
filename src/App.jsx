@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import { Routes, Route } from 'react-router-dom'
+import { Routes, Route, useLocation } from 'react-router-dom'
 import Sidebar from './components/Sidebar.jsx'
 import Player from './components/Player.jsx'
 import Home from './pages/Home.jsx'
@@ -10,12 +10,14 @@ import Artist from './pages/Artist.jsx'
 import { usePlayer } from './PlayerContext.jsx'
 
 export default function App() {
-  const { error } = usePlayer()
+  const { error, clearError } = usePlayer()
+  const location = useLocation()
+  useEffect(() => { document.querySelector('.main')?.scrollTo(0, 0) }, [location.pathname])
   return (
     <div className="app">
       <Sidebar />
       <main className="main">
-        {error && <div className="toast">{error}</div>}
+        {error && <div className="toast" role="status">{error}<button type="button" aria-label="Dismiss message" onClick={clearError}>×</button></div>}
         <Routes>
           <Route path="/" element={<Home />} />
           <Route path="/search" element={<Search />} />

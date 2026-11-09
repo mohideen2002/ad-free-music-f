@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { Link } from 'react-router-dom'
 import { usePlayer } from '../PlayerContext.jsx'
 import SongRow from '../components/SongRow.jsx'
 export default function Library() {
@@ -11,7 +12,10 @@ export default function Library() {
       <div className="chips">{['Liked', 'Recent'].map((t) => <button key={t} className={tab === t ? 'on' : ''} onClick={() => setTab(t)}>{t}</button>)}</div>
       {list.length > 0 && <button className="bigplay" onClick={() => playList(list, 0)}>▶</button>}
       {list.map((s, i) => <SongRow key={s.id} song={s} list={list} i={i} />)}
-      {!list.length && <p className="muted">Nothing here yet.</p>}
+      {!list.length && <div className="empty-state"><b>{tab === 'Liked' ? 'Your liked songs will show up here' : 'Your listening history is empty'}</b>
+        <span>{tab === 'Liked' ? 'Tap the heart on any track to save it to your library.' : 'Play a song and it will appear here.'}</span>
+        <Link className="empty-action" to={tab === 'Liked' ? '/search' : '/'}>{tab === 'Liked' ? 'Find something to play' : 'Explore music'}</Link>
+      </div>}
     </div>
   )
 }

@@ -8,6 +8,7 @@ const slim = (s) => ({ ...s, urls: [] }) // don't store expiring stream urls
 
 export function PlayerProvider({ children }) {
   const audio = useRef(new Audio())
+  const startId = useRef(0)
   const [queue, setQueue] = useState([])
   const [index, setIndex] = useState(-1)
   const [playing, setPlaying] = useState(false)
@@ -25,17 +26,23 @@ export function PlayerProvider({ children }) {
   const qualityRef = useRef(quality); qualityRef.current = quality
   const retried = useRef(false)
   const cur = useRef({}); cur.current = { queue, index }
+  const clearError = () => setError('')
 
   useEffect(() => localStorage.setItem('liked', JSON.stringify(liked.map(slim))), [liked])
   useEffect(() => localStorage.setItem('recent', JSON.stringify(recent)), [recent])
   useEffect(() => localStorage.setItem('quality', JSON.stringify(quality)), [quality])
   useEffect(() => { audio.current.volume = volume; localStorage.setItem('volume', volume) }, [volume])
 
-  const start = useCallback(async (list, i, fresh = false) => {
+  const start = useCallback(async (list, i, fresh = false, retrying = false) => {
+    if (!list?.[i]) return
+    const requestId = ++startId.current
+    if (!retrying) retried.current = false
     setError(''); setBuffering(true)
+    setTime(0); setDuration(0)
     let song = list[i]
     try {
       if (fresh || !song.urls?.length) { song = await getSong(song.id); list = list.map((s, k) => (k === i ? song : s)) }
+      if (requestId !== startId.current) return
       const url = pickUrl(song.urls, qualityRef.current)
       if (!url) throw new Error('no stream URL')
       setQueue(list); setIndex(i)
@@ -43,10 +50,10 @@ export function PlayerProvider({ children }) {
       audio.current.src = url
       await audio.current.play()
     } catch (e) {
-      if (e.name === 'AbortError') return
+      if (requestId !== startId.current || e.name === 'AbortError') return
       setBuffering(false)
       setError(`Skipped "${song.title}" (${e.message})`)
-      if (i + 1 < list.length) setTimeout(() => start(list, i + 1), 700)
+      if (i + 1 < list.length) setTimeout(() => { if (requestId === startId.current) start(list, i + 1) }, 700)
       else setPlaying(false)
     }
   }, [])
@@ -67,11 +74,16 @@ export function PlayerProvider({ children }) {
     setPlaying(false)
   }, [shuffle, repeat, start])
 
-  const prev = () => {
+  const prev = useCallback(() => {
     if (audio.current.currentTime > 3 || index <= 0) audio.current.currentTime = 0
     else start(queue, index - 1)
+  }, [index, queue, start])
+  const toggle = () => {
+    const a = audio.current
+    if (!a.src) return
+    if (a.paused) a.play().catch((e) => setError(`Could not resume playback (${e.message})`))
+    else a.pause()
   }
-  const toggle = () => { const a = audio.current; if (!a.src) return; a.paused ? a.play() : a.pause() }
   const seek = (t) => { audio.current.currentTime = t }
   const jump = (i) => start(queue, i)
   const addToQueue = (s) => setQueue((q) => dedupe([...q, s]))
@@ -85,11 +97,11 @@ export function PlayerProvider({ children }) {
       playing: () => setBuffering(false), waiting: () => setBuffering(true),
       timeupdate: () => setTime(a.currentTime),
       loadedmetadata: () => setDuration(a.duration),
-      ended: () => (repeat === 'one' ? ((a.currentTime = 0), a.play()) : next()),
+      ended: () => (repeat === 'one' ? ((a.currentTime = 0), a.play().catch((e) => setError(`Could not repeat this track (${e.message})`))) : next()),
       error: () => { // 1st failure: refresh stream url from API. 2nd: skip.
         const { queue: q, index: i } = cur.current
         if (!q[i]) return
-        if (!retried.current) { retried.current = true; start(q, i, true) } else { retried.current = false; next() }
+        if (!retried.current) { retried.current = true; start(q, i, true, true) } else { retried.current = false; next() }
       },
     }
     Object.entries(on).forEach(([e, f]) => a.addEventListener(e, f))
@@ -98,7 +110,7 @@ export function PlayerProvider({ children }) {
 
   useEffect(() => { // keyboard shortcuts
     const k = (e) => {
-      if (/INPUT|TEXTAREA/.test(e.target.tagName) && e.target.type !== 'range') return
+      if (e.target.isContentEditable || /INPUT|TEXTAREA|SELECT|BUTTON/.test(e.target.tagName)) return
       if (e.code === 'Space') { e.preventDefault(); toggle() }
       if (e.shiftKey && e.code === 'ArrowRight') next()
       if (e.shiftKey && e.code === 'ArrowLeft') prev()
@@ -107,17 +119,21 @@ export function PlayerProvider({ children }) {
   })
 
   useEffect(() => {
-    if (!current || !('mediaSession' in navigator)) return
-    navigator.mediaSession.metadata = new MediaMetadata({ title: current.title, artist: current.artist, album: current.album, artwork: [{ src: current.image }] })
-    navigator.mediaSession.setActionHandler('play', toggle)
-    navigator.mediaSession.setActionHandler('pause', toggle)
+    if (!('mediaSession' in navigator)) return
+    if (current && typeof MediaMetadata !== 'undefined') {
+      navigator.mediaSession.metadata = new MediaMetadata({ title: current.title, artist: current.artist, album: current.album, artwork: [{ src: current.image, sizes: '512x512', type: 'image/jpeg' }] })
+    }
+    navigator.mediaSession.setActionHandler('play', () => {
+      if (audio.current.paused) audio.current.play().catch((e) => setError(`Could not resume playback (${e.message})`))
+    })
+    navigator.mediaSession.setActionHandler('pause', () => audio.current.pause())
     navigator.mediaSession.setActionHandler('nexttrack', next)
     navigator.mediaSession.setActionHandler('previoustrack', prev)
   })
 
   return (
     <Ctx.Provider value={{ queue, index, current, playing, buffering, time, duration, volume, shuffle, repeat, quality, liked, recent, error,
-      playList, next, prev, toggle, seek, jump, addToQueue, setVolume, setShuffle, setRepeat, setQuality, toggleLike, isLiked }}>
+      playList, next, prev, toggle, seek, jump, addToQueue, setVolume, setShuffle, setRepeat, setQuality, toggleLike, isLiked, clearError }}>
       {children}
     </Ctx.Provider>
   )
