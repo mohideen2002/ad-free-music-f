@@ -1,0 +1,124 @@
+import { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react'
+import { getSong, getSuggestions, pickUrl, dedupe } from './api.js'
+
+const Ctx = createContext()
+export const usePlayer = () => useContext(Ctx)
+const load = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d } catch { return d } }
+const slim = (s) => ({ ...s, urls: [] }) // don't store expiring stream urls
+
+export function PlayerProvider({ children }) {
+  const audio = useRef(new Audio())
+  const [queue, setQueue] = useState([])
+  const [index, setIndex] = useState(-1)
+  const [playing, setPlaying] = useState(false)
+  const [time, setTime] = useState(0)
+  const [duration, setDuration] = useState(0)
+  const [volume, setVolume] = useState(() => load('volume', 0.8))
+  const [shuffle, setShuffle] = useState(false)
+  const [repeat, setRepeat] = useState('off')
+  const [quality, setQuality] = useState(() => load('quality', '160kbps'))
+  const [liked, setLiked] = useState(() => load('liked', []))
+  const [recent, setRecent] = useState(() => load('recent', []))
+  const [error, setError] = useState('')
+  const [buffering, setBuffering] = useState(false)
+  const current = queue[index]
+  const qualityRef = useRef(quality); qualityRef.current = quality
+  const retried = useRef(false)
+  const cur = useRef({}); cur.current = { queue, index }
+
+  useEffect(() => localStorage.setItem('liked', JSON.stringify(liked.map(slim))), [liked])
+  useEffect(() => localStorage.setItem('recent', JSON.stringify(recent)), [recent])
+  useEffect(() => localStorage.setItem('quality', JSON.stringify(quality)), [quality])
+  useEffect(() => { audio.current.volume = volume; localStorage.setItem('volume', volume) }, [volume])
+
+  const start = useCallback(async (list, i, fresh = false) => {
+    setError(''); setBuffering(true)
+    let song = list[i]
+    try {
+      if (fresh || !song.urls?.length) { song = await getSong(song.id); list = list.map((s, k) => (k === i ? song : s)) }
+      const url = pickUrl(song.urls, qualityRef.current)
+      if (!url) throw new Error('no stream URL')
+      setQueue(list); setIndex(i)
+      setRecent((r) => [slim(song), ...r.filter((x) => x.id !== song.id)].slice(0, 30))
+      audio.current.src = url
+      await audio.current.play()
+    } catch (e) {
+      if (e.name === 'AbortError') return
+      setBuffering(false)
+      setError(`Skipped "${song.title}" (${e.message})`)
+      if (i + 1 < list.length) setTimeout(() => start(list, i + 1), 700)
+      else setPlaying(false)
+    }
+  }, [])
+
+  const playList = (list, i = 0) => list?.length && start(list, i)
+
+  const next = useCallback(async () => {
+    const { queue: q, index: i } = cur.current
+    if (!q.length) return
+    let n = shuffle && q.length > 1 ? (i + 1 + Math.floor(Math.random() * (q.length - 1))) % q.length : i + 1
+    if (n < q.length) return start(q, n)
+    if (repeat === 'all') return start(q, 0)
+    // Autoplay: queue ended -> load similar (Tamil-first) songs
+    try {
+      const more = (await getSuggestions(q[i].id)).filter((s) => !q.some((x) => x.id === s.id))
+      if (more.length) return start([...q, ...more], q.length)
+    } catch {}
+    setPlaying(false)
+  }, [shuffle, repeat, start])
+
+  const prev = () => {
+    if (audio.current.currentTime > 3 || index <= 0) audio.current.currentTime = 0
+    else start(queue, index - 1)
+  }
+  const toggle = () => { const a = audio.current; if (!a.src) return; a.paused ? a.play() : a.pause() }
+  const seek = (t) => { audio.current.currentTime = t }
+  const jump = (i) => start(queue, i)
+  const addToQueue = (s) => setQueue((q) => dedupe([...q, s]))
+  const toggleLike = (s) => setLiked((l) => (l.some((x) => x.id === s.id) ? l.filter((x) => x.id !== s.id) : [slim(s), ...l]))
+  const isLiked = (id) => liked.some((x) => x.id === id)
+
+  useEffect(() => {
+    const a = audio.current
+    const on = {
+      play: () => setPlaying(true), pause: () => setPlaying(false),
+      playing: () => setBuffering(false), waiting: () => setBuffering(true),
+      timeupdate: () => setTime(a.currentTime),
+      loadedmetadata: () => setDuration(a.duration),
+      ended: () => (repeat === 'one' ? ((a.currentTime = 0), a.play()) : next()),
+      error: () => { // 1st failure: refresh stream url from API. 2nd: skip.
+        const { queue: q, index: i } = cur.current
+        if (!q[i]) return
+        if (!retried.current) { retried.current = true; start(q, i, true) } else { retried.current = false; next() }
+      },
+    }
+    Object.entries(on).forEach(([e, f]) => a.addEventListener(e, f))
+    return () => Object.entries(on).forEach(([e, f]) => a.removeEventListener(e, f))
+  }, [next, repeat, start])
+
+  useEffect(() => { // keyboard shortcuts
+    const k = (e) => {
+      if (/INPUT|TEXTAREA/.test(e.target.tagName) && e.target.type !== 'range') return
+      if (e.code === 'Space') { e.preventDefault(); toggle() }
+      if (e.shiftKey && e.code === 'ArrowRight') next()
+      if (e.shiftKey && e.code === 'ArrowLeft') prev()
+    }
+    window.addEventListener('keydown', k); return () => window.removeEventListener('keydown', k)
+  })
+
+  useEffect(() => {
+    if (!current || !('mediaSession' in navigator)) return
+    navigator.mediaSession.metadata = new MediaMetadata({ title: current.title, artist: current.artist, album: current.album, artwork: [{ src: current.image }] })
+    navigator.mediaSession.setActionHandler('play', toggle)
+    navigator.mediaSession.setActionHandler('pause', toggle)
+    navigator.mediaSession.setActionHandler('nexttrack', next)
+    navigator.mediaSession.setActionHandler('previoustrack', prev)
+  })
+
+  return (
+    <Ctx.Provider value={{ queue, index, current, playing, buffering, time, duration, volume, shuffle, repeat, quality, liked, recent, error,
+      playList, next, prev, toggle, seek, jump, addToQueue, setVolume, setShuffle, setRepeat, setQuality, toggleLike, isLiked }}>
+      {children}
+    </Ctx.Provider>
+  )
+}
