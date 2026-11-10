@@ -2,16 +2,46 @@ import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { usePlayer } from '../PlayerContext.jsx'
 import { fmt } from './SongRow.jsx'
+import { getLyrics } from '../api.js'
 import Icon from './Icon.jsx'
+import ArtistNames from './ArtistNames.jsx'
 
 export default function Player() {
   const p = usePlayer()
   const nav = useNavigate()
   const [queueOpen, setQueueOpen] = useState(false)
   const [expanded, setExpanded] = useState(false)
+  const [lyricsOpen, setLyricsOpen] = useState(false)
+  const [lyrics, setLyrics] = useState('')
+  const [lyricsLoading, setLyricsLoading] = useState(false)
+  const [lyricsError, setLyricsError] = useState('')
+  const [lyricsAttempt, setLyricsAttempt] = useState(0)
   const openButtonRef = useRef(null)
   const closeButtonRef = useRef(null)
+  const swipeStartRef = useRef(null)
+  const ignoreSwipeClickRef = useRef(false)
   const c = p.current
+
+  useEffect(() => {
+    if (!expanded || !lyricsOpen || !c) return
+    let active = true
+    setLyrics('')
+    setLyricsError('')
+    if (c.hasLyrics === false) {
+      setLyricsLoading(false)
+      setLyricsError('Lyrics are not available from the current music source for this track.')
+      return () => { active = false }
+    }
+    setLyricsLoading(true)
+    getLyrics(c.id).then((text) => {
+      if (active) setLyrics(text)
+    }).catch(() => {
+      if (active) setLyricsError('Lyrics are unavailable for this track.')
+    }).finally(() => {
+      if (active) setLyricsLoading(false)
+    })
+    return () => { active = false }
+  }, [expanded, lyricsOpen, c?.id, lyricsAttempt])
 
   useEffect(() => {
     if (!expanded) return
@@ -53,6 +83,37 @@ export default function Player() {
       </button>
     </div>
   )
+  const sleepValue = p.sleepTimer?.type === 'track' ? 'track'
+    : p.sleepTimer?.type === 'timer' ? String(p.sleepTimer.minutes) : 'off'
+  const handleTrackTouchStart = (event) => {
+    if (event.touches.length !== 1) {
+      swipeStartRef.current = null
+      return
+    }
+    const touch = event.touches[0]
+    swipeStartRef.current = { x: touch.clientX, y: touch.clientY }
+  }
+  const handleTrackTouchEnd = (event) => {
+    const start = swipeStartRef.current
+    swipeStartRef.current = null
+    if (!start) return
+    const touch = event.changedTouches[0]
+    const dx = touch.clientX - start.x
+    const dy = touch.clientY - start.y
+    if (Math.abs(dx) < 50 || Math.abs(dx) < Math.abs(dy) * 1.25) return
+    ignoreSwipeClickRef.current = true
+    setTimeout(() => { ignoreSwipeClickRef.current = false }, 800)
+    if (dx < 0) p.next()
+    else p.prev()
+  }
+  const handleTrackClick = (event) => {
+    if (ignoreSwipeClickRef.current) {
+      event.preventDefault()
+      ignoreSwipeClickRef.current = false
+      return
+    }
+    setExpanded(true)
+  }
 
   const seek = (
     <div className="seek">
@@ -69,10 +130,17 @@ export default function Player() {
     <div className={'queue' + (expanded ? ' expanded-queue' : '')} aria-label="Play queue">
       <div className="queue-heading"><h3>Queue</h3><span>{p.queue.length} tracks</span></div>
       {p.queue.map((s, i) => (
-        <button type="button" key={s.id + i} className={'qrow' + (i === p.index ? ' on' : '')}
-          aria-current={i === p.index ? 'true' : undefined} onClick={() => p.jump(i)}>
-          <img src={s.image} alt="" /><span className="meta"><b>{s.title}</b><span>{s.artist}</span></span>
-        </button>
+        <div key={s.id + i} className="qrow-wrap">
+          <button type="button" className={'qrow' + (i === p.index ? ' on' : '')}
+            aria-current={i === p.index ? 'true' : undefined} onClick={() => p.jump(i)}>
+            <img src={s.image} alt="" /><span className="meta"><b>{s.title}</b><span>{s.artist}</span></span>
+          </button>
+          <div className="qrow-actions">
+            <button type="button" aria-label={`Move ${s.title} up in queue`} disabled={i === 0} onClick={() => p.moveQueue(i, i - 1)}>↑</button>
+            <button type="button" aria-label={`Move ${s.title} down in queue`} disabled={i === p.queue.length - 1} onClick={() => p.moveQueue(i, i + 1)}>↓</button>
+            <button type="button" aria-label={`Remove ${s.title} from queue`} onClick={() => p.removeFromQueue(i)}>×</button>
+          </div>
+        </div>
       ))}
       {!p.queue.length && <p className="muted">Nothing queued yet. Add a song using ＋.</p>}
     </div>
@@ -84,7 +152,9 @@ export default function Player() {
       <div className="now">
         {c
           ? <>
-            <button ref={openButtonRef} type="button" className="now-open" onClick={() => setExpanded(true)} aria-label={`Open now playing: ${c.title} by ${c.artist}`}>
+            <button ref={openButtonRef} type="button" className="now-open" onClick={handleTrackClick}
+              onTouchStart={handleTrackTouchStart} onTouchEnd={handleTrackTouchEnd} onTouchCancel={() => { swipeStartRef.current = null }}
+              aria-label={`Open now playing: ${c.title} by ${c.artist}. Swipe left for next track or right for previous track.`}>
               <img src={c.image} alt="" />
               <span className="meta"><b>{c.title}</b><span>{c.artist}</span></span>
             </button>
@@ -116,22 +186,32 @@ export default function Player() {
             <header className="expanded-header">
               <button ref={closeButtonRef} type="button" className="icon-button" aria-label="Close now playing" onClick={() => setExpanded(false)}><Icon name="close" /></button>
               <div><small>NOW PLAYING</small><b>{c?.album || 'Musify'}</b></div>
-              <button type="button" className={'icon-button' + (queueOpen ? ' on' : '')} aria-label={queueOpen ? 'Hide queue' : 'Show queue'}
-                aria-expanded={queueOpen} onClick={() => setQueueOpen(!queueOpen)}><Icon name="queue" /></button>
+              <div className="header-actions">
+                <button type="button" className={'text-button' + (lyricsOpen ? ' on' : '')} aria-pressed={lyricsOpen}
+                  onClick={() => setLyricsOpen((open) => !open)}>Lyrics</button>
+                <button type="button" className={'icon-button' + (queueOpen ? ' on' : '')} aria-label={queueOpen ? 'Hide queue' : 'Show queue'}
+                  aria-expanded={queueOpen} onClick={() => setQueueOpen(!queueOpen)}><Icon name="queue" /></button>
+              </div>
             </header>
             {c && (
               <>
                 <img className="expanded-art" src={c.image} alt="" />
                 <div className="expanded-track">
                   <div className="meta"><b>{c.title}</b>
-                    {c.artistId
-                      ? <button type="button" className="artist-link" onClick={() => { setExpanded(false); nav('/artist/' + c.artistId) }}>{c.artist}</button>
-                      : <span>{c.artist}</span>}
+                    <ArtistNames artists={c.artistLinks} fallback={c.artist} onNavigate={() => setExpanded(false)} />
                   </div>
                   <button type="button" className={'heart' + (p.isLiked(c.id) ? ' on' : '')}
                     aria-label={p.isLiked(c.id) ? `Unlike ${c.title}` : `Like ${c.title}`}
                     aria-pressed={p.isLiked(c.id)} onClick={() => p.toggleLike(c)}><Icon name="heart" /></button>
                 </div>
+                {lyricsOpen && <section className="lyrics-panel" aria-label="Lyrics">
+                  <h2>Lyrics</h2>
+                  {lyricsLoading && <p className="muted" role="status">Loading lyrics…</p>}
+                  {lyricsError && <div className="inline-notice" role="status"><span>{lyricsError}</span>
+                    {c.hasLyrics !== false && <button type="button" className="retry-button" onClick={() => setLyricsAttempt((attempt) => attempt + 1)}>Try again</button>}
+                  </div>}
+                  {lyrics && <p className="lyrics-text">{lyrics}</p>}
+                </section>}
                 {seek}
                 {controls}
                 <div className="expanded-settings">
@@ -143,6 +223,14 @@ export default function Player() {
                     <select value={p.quality} onChange={(e) => p.setQuality(e.target.value)}>
                       {['96kbps', '160kbps', '320kbps'].map((q) => <option key={q}>{q}</option>)}
                     </select>
+                  </label>
+                  <label><span>Sleep timer</span>
+                    <select value={sleepValue} onChange={(event) => p.setSleepTimer(event.target.value)}>
+                      <option value="off">Off</option>
+                      <option value="track">At end of track</option>
+                      {[5, 10, 15, 30, 45, 60].map((minutes) => <option key={minutes} value={minutes}>{minutes} minutes</option>)}
+                    </select>
+                    {p.sleepTimer?.type === 'timer' && <small className="timer-remaining">{fmt(p.sleepTimer.remaining)} left</small>}
                   </label>
                 </div>
                 {queue}

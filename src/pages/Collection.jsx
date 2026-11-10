@@ -1,15 +1,14 @@
 import { useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { getAlbum, getPlaylist } from '../api.js'
-import { usePlayer } from '../PlayerContext.jsx'
 import SongRow from '../components/SongRow.jsx'
+import BigPlayButton from '../components/BigPlayButton.jsx'
 export default function Collection({ type }) {
   const { id } = useParams()
   const [a, setA] = useState(null)
   const [err, setErr] = useState(false)
   const [attempt, setAttempt] = useState(0)
   const [detailsExpanded, setDetailsExpanded] = useState(false)
-  const { playList } = usePlayer()
   useEffect(() => {
     let active = true
     setA(null)
@@ -38,8 +37,7 @@ export default function Collection({ type }) {
         </div>
       </header>
       <div className="collection-actions">
-        <button type="button" className="bigplay" aria-label={`Play ${a.title}`} disabled={!a.songs.length}
-          onClick={() => playList(a.songs, 0)}>▶</button>
+        <BigPlayButton list={a.songs} label={a.title} />
       </div>
       {a.songs.length > 0
         ? <section className="collection-tracks" aria-label={`${a.title} tracks`}>

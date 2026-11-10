@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
-import { searchSongs, searchAlbums, searchPlaylists, searchArtists } from '../api.js'
+import { searchSongs, searchAlbums, searchPlaylists, searchArtists, dedupe } from '../api.js'
 import { usePlayer } from '../PlayerContext.jsx'
-import Section from '../components/Section.jsx'
+import Section, { CardGrid } from '../components/Section.jsx'
+import { Link } from 'react-router-dom'
 
 const SECTIONS = [
   { t: 'Tamil Trending', kind: 'songs', f: () => searchSongs('trending', 0, 12) },
@@ -67,14 +68,66 @@ function HomeSection({ config, priority }) {
   )
 }
 
+function PersonalizedMix({ liked, recent }) {
+  const [items, setItems] = useState([])
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const [attempt, setAttempt] = useState(0)
+  const seeds = [...liked, ...recent].filter((song, index, list) => list.findIndex((item) => item.id === song.id) === index).slice(0, 3)
+  const seedKey = seeds.map((song) => song.id).join('|')
+
+  useEffect(() => {
+    let active = true
+    setItems([])
+    setError('')
+    if (!seeds.length) {
+      setLoading(false)
+      return () => { active = false }
+    }
+    setLoading(true)
+    const queries = [...new Set(seeds.map((song) => song.artist?.split(',')[0].trim() || song.title).filter(Boolean))]
+    Promise.allSettled(queries.map((query) => searchSongs(query, 0, 12))).then((results) => {
+      if (!active) return
+      const suggestions = results.flatMap((result) => result.status === 'fulfilled' ? result.value : [])
+      const seedIds = new Set(seeds.map((song) => song.id))
+      const mixed = dedupe(suggestions.filter((song) => !seedIds.has(song.id))).slice(0, 12)
+      setItems(mixed)
+      if (!mixed.length) {
+        setError(results.every((result) => result.status === 'rejected')
+          ? 'Could not build your mix right now.'
+          : 'No recommendations found yet. Keep listening and check back.')
+      }
+    }).finally(() => {
+      if (active) setLoading(false)
+    })
+    return () => { active = false }
+  }, [seedKey, attempt])
+
+  if (!seeds.length) return <section className="personalized-empty">
+    <h2>Your Mix</h2><p>Like or play a few songs to get recommendations picked for you.</p>
+    <Link className="empty-action" to="/search">Discover music</Link>
+  </section>
+  return <section className="personalized-mix">
+    <h2>Your Mix</h2>
+    <p className="mix-subtitle">Based on your liked and recently played songs</p>
+    {error
+      ? <div className="inline-notice" role="status">{error}<button type="button" className="retry-button" onClick={() => setAttempt((value) => value + 1)}>Try again</button></div>
+      : loading
+        ? <p className="muted" role="status">Finding music for you…</p>
+        : items.length ? <CardGrid kind="songs" items={items} />
+          : <p className="muted">No recommendations found yet. Keep listening and check back.</p>}
+  </section>
+}
+
 export default function Home() {
-  const { recent } = usePlayer()
+  const { recent, liked } = usePlayer()
   const h = new Date().getHours()
   return (
     <div className="page">
-      <h1>{h < 12 ? 'காலை வணக்கம்' : h < 18 ? 'மதிய வணக்கம்' : 'மாலை வணக்கம்'}</h1>
+      <h1>{h < 12 ? 'காலை வணக்கம்' : h < 17 ? 'மதிய வணக்கம்' : h < 20 ? 'மாலை வணக்கம்' : 'இரவு வணக்கம்'}</h1>
       <p className="home-subtitle">A little music for your day</p>
       {recent.length > 0 && <Section title="Recently Played" kind="songs" items={recent.slice(0, 8)} />}
+      <PersonalizedMix liked={liked} recent={recent} />
       {SECTIONS.map((config, index) => <HomeSection key={config.t} config={config} priority={index < 2} />)}
     </div>
   )

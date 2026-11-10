@@ -20,18 +20,48 @@ export function PlayerProvider({ children }) {
   const [quality, setQuality] = useState(() => load('quality', '160kbps'))
   const [liked, setLiked] = useState(() => load('liked', []))
   const [recent, setRecent] = useState(() => load('recent', []))
+  const [playlists, setPlaylists] = useState(() => load('playlists', []))
+  const [sleepTimer, setSleepTimerState] = useState(null)
   const [error, setError] = useState('')
   const [buffering, setBuffering] = useState(false)
   const current = queue[index]
   const qualityRef = useRef(quality); qualityRef.current = quality
   const retried = useRef(false)
   const cur = useRef({}); cur.current = { queue, index }
+  const sleepRef = useRef(sleepTimer); sleepRef.current = sleepTimer
   const clearError = () => setError('')
 
   useEffect(() => localStorage.setItem('liked', JSON.stringify(liked.map(slim))), [liked])
   useEffect(() => localStorage.setItem('recent', JSON.stringify(recent)), [recent])
+  useEffect(() => localStorage.setItem('playlists', JSON.stringify(playlists.map((playlist) => ({ ...playlist, songs: playlist.songs.map(slim) })))), [playlists])
   useEffect(() => localStorage.setItem('quality', JSON.stringify(quality)), [quality])
   useEffect(() => { audio.current.volume = volume; localStorage.setItem('volume', volume) }, [volume])
+
+  const setSleepTimer = useCallback((value) => {
+    if (value === 'track') {
+      setSleepTimerState({ type: 'track' })
+    } else if (Number(value) > 0) {
+      setSleepTimerState({ type: 'timer', minutes: Number(value), endsAt: Date.now() + Number(value) * 60000, remaining: Number(value) * 60 })
+    } else {
+      setSleepTimerState(null)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (sleepTimer?.type !== 'timer') return
+    const timer = setInterval(() => {
+      const remaining = Math.max(0, Math.ceil((sleepTimer.endsAt - Date.now()) / 1000))
+      setSleepTimerState((currentTimer) => {
+        if (currentTimer?.type !== 'timer') return currentTimer
+        if (!remaining) {
+          audio.current.pause()
+          return null
+        }
+        return currentTimer.remaining === remaining ? currentTimer : { ...currentTimer, remaining }
+      })
+    }, 1000)
+    return () => clearInterval(timer)
+  }, [sleepTimer?.type, sleepTimer?.endsAt])
 
   const start = useCallback(async (list, i, fresh = false, retrying = false) => {
     if (!list?.[i]) return
@@ -87,8 +117,63 @@ export function PlayerProvider({ children }) {
   const seek = (t) => { audio.current.currentTime = t }
   const jump = (i) => start(queue, i)
   const addToQueue = (s) => setQueue((q) => dedupe([...q, s]))
+  const playNext = useCallback((song) => {
+    const { queue: q, index: i } = cur.current
+    if (i < 0) return start([song, ...q], 0)
+    setQueue((items) => [...items.slice(0, i + 1), song, ...items.slice(i + 1)])
+  }, [start])
+  const moveQueue = useCallback((from, to) => {
+    const { queue: q } = cur.current
+    if (to < 0 || to >= q.length || from < 0 || from >= q.length || from === to) return
+    const reordered = [...q]
+    const [song] = reordered.splice(from, 1)
+    reordered.splice(to, 0, song)
+    setQueue(reordered)
+    setIndex((i) => i === from ? to : from < i && to >= i ? i - 1 : from > i && to <= i ? i + 1 : i)
+  }, [])
+  const removeFromQueue = useCallback((removeIndex) => {
+    const { queue: q, index: i } = cur.current
+    if (removeIndex < 0 || removeIndex >= q.length) return
+    const remaining = q.filter((_, n) => n !== removeIndex)
+    if (removeIndex === i) {
+      if (!remaining.length) {
+        startId.current++
+        audio.current.pause()
+        audio.current.removeAttribute('src')
+        audio.current.load()
+        setQueue([])
+        setIndex(-1)
+        setTime(0)
+        setDuration(0)
+        setBuffering(false)
+      } else {
+        start(remaining, Math.min(i, remaining.length - 1))
+      }
+    } else {
+      setQueue(remaining)
+      if (removeIndex < i) setIndex(i - 1)
+    }
+  }, [start])
   const toggleLike = (s) => setLiked((l) => (l.some((x) => x.id === s.id) ? l.filter((x) => x.id !== s.id) : [slim(s), ...l]))
   const isLiked = (id) => liked.some((x) => x.id === id)
+  const createPlaylist = (title) => {
+    const name = title.trim()
+    if (!name) return
+    const id = `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    setPlaylists((items) => [...items, { id, title: name, songs: [] }])
+    return id
+  }
+  const renamePlaylist = (id, title) => {
+    const name = title.trim()
+    if (name) setPlaylists((items) => items.map((playlist) => playlist.id === id ? { ...playlist, title: name } : playlist))
+  }
+  const deletePlaylist = (id) => setPlaylists((items) => items.filter((playlist) => playlist.id !== id))
+  const addSongToPlaylist = (id, song) => setPlaylists((items) => items.map((playlist) =>
+    playlist.id === id && !playlist.songs.some((item) => item.id === song.id)
+      ? { ...playlist, songs: [...playlist.songs, slim(song)] }
+      : playlist))
+  const removeSongFromPlaylist = (id, songId) => setPlaylists((items) => items.map((playlist) =>
+    playlist.id === id ? { ...playlist, songs: playlist.songs.filter((song) => song.id !== songId) } : playlist))
 
   useEffect(() => {
     const a = audio.current
@@ -97,8 +182,21 @@ export function PlayerProvider({ children }) {
       playing: () => setBuffering(false), waiting: () => setBuffering(true),
       timeupdate: () => setTime(a.currentTime),
       loadedmetadata: () => setDuration(a.duration),
-      ended: () => (repeat === 'one' ? ((a.currentTime = 0), a.play().catch((e) => setError(`Could not repeat this track (${e.message})`))) : next()),
+      ended: () => {
+        if (sleepRef.current?.type === 'track') {
+          setSleepTimerState(null)
+          a.pause()
+          return
+        }
+        if (repeat === 'one') {
+          a.currentTime = 0
+          a.play().catch((e) => setError(`Could not repeat this track (${e.message})`))
+        } else {
+          next()
+        }
+      },
       error: () => { // 1st failure: refresh stream url from API. 2nd: skip.
+        if (!a.src) return
         const { queue: q, index: i } = cur.current
         if (!q[i]) return
         if (!retried.current) { retried.current = true; start(q, i, true, true) } else { retried.current = false; next() }
@@ -132,8 +230,10 @@ export function PlayerProvider({ children }) {
   })
 
   return (
-    <Ctx.Provider value={{ queue, index, current, playing, buffering, time, duration, volume, shuffle, repeat, quality, liked, recent, error,
-      playList, next, prev, toggle, seek, jump, addToQueue, setVolume, setShuffle, setRepeat, setQuality, toggleLike, isLiked, clearError }}>
+    <Ctx.Provider value={{ queue, index, current, playing, buffering, time, duration, volume, shuffle, repeat, quality, liked, recent, playlists, sleepTimer, error,
+      playList, next, prev, toggle, seek, jump, addToQueue, playNext, moveQueue, removeFromQueue,
+      createPlaylist, renamePlaylist, deletePlaylist, addSongToPlaylist, removeSongFromPlaylist, setSleepTimer,
+      setVolume, setShuffle, setRepeat, setQuality, toggleLike, isLiked, clearError }}>
       {children}
     </Ctx.Provider>
   )
